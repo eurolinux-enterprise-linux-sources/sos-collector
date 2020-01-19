@@ -14,6 +14,7 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 import fnmatch
+import inspect
 import logging
 import os
 import random
@@ -27,7 +28,6 @@ import subprocess
 import sys
 
 from datetime import datetime
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from .sosnode import SosNode
 from distutils.sysconfig import get_python_lib
@@ -41,21 +41,28 @@ class SosCollector():
     '''Main sos-collector class'''
 
     def __init__(self, config):
+        os.umask(0o77)
         self.config = config
-        self.threads = []
-        self.workers = []
         self.client_list = []
         self.node_list = []
         self.master = False
         self.retrieved = 0
         self.need_local_sudo = False
         if not self.config['list_options']:
-            if not self.config['tmp_dir']:
-                self.create_tmp_dir()
-            self._setup_logging()
-            self._load_clusters()
-            self._parse_options()
-            self.prep()
+            try:
+                if not self.config['tmp_dir']:
+                    self.create_tmp_dir()
+                self._setup_logging()
+                self.log_debug('Executing %s' % ' '.join(s for s in sys.argv))
+                self.clusters = self.config['cluster_types']
+                self.log_debug("Found cluster profiles: %s"
+                               % self.clusters.keys())
+                self.log_debug("Found supported host types: %s"
+                               % self.config['host_types'].keys())
+                self._parse_options()
+                self.prep()
+            except KeyboardInterrupt:
+                self._exit('Exiting on user cancel', 130)
         else:
             self._load_clusters()
 
@@ -72,6 +79,9 @@ class SosCollector():
         hndlr.setLevel(logging.DEBUG)
         self.logger.addHandler(hndlr)
 
+        console = logging.StreamHandler(sys.stderr)
+        console.setFormatter(logging.Formatter('%(message)s'))
+
         # ui logging
         self.console = logging.getLogger('sos_collector_console')
         self.console.setLevel(logging.DEBUG)
@@ -79,15 +89,18 @@ class SosCollector():
             mode="w+",
             dir=self.config['tmp_dir'])
         chandler = logging.StreamHandler(self.console_log_file)
-        chandler.setFormatter(logging.Formatter(
-            '%(asctime)s %(levelname)s: %(message)s'))
+        cfmt = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+        chandler.setFormatter(cfmt)
         self.console.addHandler(chandler)
 
         # also print to console
         ui = logging.StreamHandler()
         fmt = logging.Formatter('%(message)s')
         ui.setFormatter(fmt)
-        ui.setLevel(logging.INFO)
+        if self.config['verbose']:
+            ui.setLevel(logging.DEBUG)
+        else:
+            ui.setLevel(logging.INFO)
         self.console.addHandler(ui)
 
     def _exit(self, msg, error=1):
@@ -145,6 +158,11 @@ class SosCollector():
         self.logger.info(msg)
         self.console.info(msg)
 
+    def log_warn(self, msg):
+        '''Log warn messages to both console and log file'''
+        self.logger.warn(msg)
+        self.console.warn('WARNING: %s' % msg)
+
     def log_error(self, msg):
         '''Log error messages to both console and log file'''
         self.logger.error(msg)
@@ -152,12 +170,15 @@ class SosCollector():
 
     def log_debug(self, msg):
         '''Log debug message to both console and log file'''
+        caller = inspect.stack()[1][3]
+        msg = '[sos_collector:%s] %s' % (caller, msg)
         self.logger.debug(msg)
-        self.console.debug(msg)
+        if self.config['verbose']:
+            self.console.debug(msg)
 
     def create_tmp_dir(self):
         '''Creates a temp directory to transfer sosreports to'''
-        tmpdir = tempfile.mkdtemp(prefix='sos-collector-')
+        tmpdir = tempfile.mkdtemp(prefix='sos-collector-', dir='/var/tmp')
         self.config['tmp_dir'] = tmpdir
         self.config['tmp_dir_created'] = True
 
@@ -188,25 +209,6 @@ class SosCollector():
     def delete_tmp_dir(self):
         '''Removes the temp directory and all collected sosreports'''
         shutil.rmtree(self.config['tmp_dir'])
-
-    def _load_clusters(self):
-        '''Load an instance of each cluster so that sos-collector can later
-        determine what type of cluster is in use
-        '''
-        if 'soscollector' not in os.listdir(os.getcwd()):
-            p = get_python_lib()
-            path = p + '/soscollector/clusters/'
-        else:
-            path = 'soscollector/clusters'
-        self.clusters = OrderedDict()
-        sys.path.insert(0, path)
-        for f in sorted(os.listdir(path)):
-            fname, ext = os.path.splitext(f)
-            if ext == '.py' and fname not in ['__init__', 'cluster']:
-                mod = __import__(fname)
-                class_ = getattr(mod, fname)
-                self.clusters[fname] = class_(self.config)
-        sys.path.pop(0)
 
     def _get_archive_name(self):
         '''Generates a name for the tarball archive'''
@@ -249,8 +251,8 @@ to manage the SSH connections to remote systems. If this \
 library is not acceptable for use in your environment, \
 you should not use this utility.
 
-An archive of collected sosreport tarballs will be generated in \
-%s and may be provided to an appropriate support representative.
+An archive of sosreport tarballs collected from the nodes will be \
+generated in %s and may be provided to an appropriate support representative.
 
 The generated archive may contain data considered sensitive \
 and its content should be reviewed by the originating \
@@ -259,21 +261,37 @@ organization before being passed to any third party.
 No configuration changes will be made to the system running \
 this utility or remote systems that it connects to.
 """)
-
         self.console.info("\nsos-collector (version %s)\n" % __version__)
         intro_msg = self._fmt_msg(disclaimer % self.config['tmp_dir'])
-        intro_msg += "\nPress ENTER to continue, or CTRL-C to quit\n"
-        try:
-            input(intro_msg)
-        except KeyboardInterrupt:
-            self.console.error("Exiting on user cancel")
-            self._exit(130)
+        self.console.info(intro_msg)
+        self.configure_sos_cmd()
+        prompt = "\nPress ENTER to continue, or CTRL-C to quit\n"
+        if not self.config['batch']:
+            input(prompt)
 
         if not self.config['password']:
             self.log_debug('password not specified, assuming SSH keys')
             msg = ('sos-collector ASSUMES that SSH keys are installed on all '
                    'nodes unless the --password option is provided.\n')
             self.console.info(self._fmt_msg(msg))
+
+        if self.config['password']:
+            self.log_debug('password specified, not using SSH keys')
+            msg = ('Provide the SSH password for user %s: '
+                   % self.config['ssh_user'])
+            self.config['password'] = getpass(prompt=msg)
+
+        if self.config['need_sudo'] and not self.config['insecure_sudo']:
+            if not self.config['password']:
+                self.log_debug('non-root user specified, will request '
+                               'sudo password')
+                msg = ('A non-root user has been provided. Provide sudo '
+                       'password for %s on remote nodes: '
+                       % self.config['ssh_user'])
+                self.config['sudo_pw'] = getpass(prompt=msg)
+            else:
+                if not self.config['insecure_sudo']:
+                    self.config['sudo_pw'] = self.config['password']
 
         if self.config['become_root']:
             if not self.config['ssh_user'] == 'root':
@@ -287,36 +305,33 @@ this utility or remote systems that it connects to.
                               ' Ignoring request to change user on node')
                 self.config['become_root'] = False
 
-        if self.config['need_sudo'] and not self.config['become_root']:
-            self.log_debug('non-root user specified, will request '
-                           'sudo password')
-            msg = ('A non-root user has been provided. Provide sudo password'
-                   ' for %s on remote nodes: ' % self.config['ssh_user'])
-            self.config['sudo_pw'] = getpass(prompt=msg)
-
-        if self.config['password']:
-            self.log_debug('password specified, not using SSH keys')
-            msg = ('User requested password authentication.\nProvide the SSH '
-                   'password for user %s: ' % self.config['ssh_user']
-                   )
-            self.config['password'] = getpass(prompt=msg)
         if self.config['master']:
             self.connect_to_master()
             self.config['no_local'] = True
         else:
-            self.master = SosNode('localhost', self.config)
+            try:
+                self.master = SosNode('localhost', self.config)
+            except Exception as err:
+                self.log_debug("Unable to determine local installation: %s" %
+                               err)
+                self._exit('Unable to determine local installation. Use the '
+                           '--no-local option if localhost should not be '
+                           'included.\nAborting...\n', 1)
+
         if self.config['cluster_type']:
             self.config['cluster'] = self.clusters[self.config['cluster_type']]
+            self.config['cluster'].master = self.master
         else:
             self.determine_cluster()
         if self.config['cluster'] is None and not self.config['nodes']:
             msg = ('Cluster type could not be determined and no nodes provided'
                    '\nAborting...')
             self._exit(msg, 1)
-        self.config['cluster'].setup()
+        if self.config['cluster']:
+            self.config['cluster'].setup()
+            self.config['cluster'].modify_sos_cmd()
         self.get_nodes()
         self.intro()
-        self.configure_sos_cmd()
 
     def intro(self):
         '''Prints initial messages and collects user and case if not
@@ -338,31 +353,39 @@ this utility or remote systems that it connects to.
 
         self.console.info('')
 
-        if not self.config['case_id']:
+        if not self.config['case_id'] and not self.config['batch']:
             msg = 'Please enter the case id you are collecting reports for: '
             self.config['case_id'] = input(msg)
 
     def configure_sos_cmd(self):
         '''Configures the sosreport command that is run on the nodes'''
         if self.config['sos_opt_line']:
-            self.config['sos_cmd'] += self.config['sos_opt_line']
-            self.log_debug("User specified manual sosreport command line. "
-                           "sos command set to %s" % self.config['sos_cmd'])
-            return True
+            filt = ['&', '|', '>', '<']
+            if any(f in self.config['sos_opt_line'] for f in filt):
+                self.log_warn('Possible shell script found in provided sos '
+                              'command. Ignoring --sos-cmd option entirely.')
+                self.config['sos_opt_line'] = None
+            else:
+                self.config['sos_cmd'] = '%s %s' % (
+                    self.config['sos_cmd'], self.config['sos_opt_line'])
+                self.log_debug("User specified manual sosreport command. "
+                               "Command set to %s" % self.config['sos_cmd'])
+                return True
         if self.config['case_id']:
-            self.config['sos_cmd'] += '--case-id=%s ' % self.config['case_id']
+            self.config['sos_cmd'] += ' --case-id=%s' % self.config['case_id']
         if self.config['alloptions']:
-            self.config['sos_cmd'] += '--alloptions '
+            self.config['sos_cmd'] += ' --alloptions'
         if self.config['verify']:
-            self.config['sos_cmd'] += '--verify '
+            self.config['sos_cmd'] += ' --verify'
+        if self.config['log_size']:
+            self.config['sos_cmd'] += (' --log-size=%s'
+                                       % self.config['log_size'])
         if self.config['sysroot']:
-            self.config['sos_cmd'] += '-s %s ' % self.config['sysroot']
+            self.config['sos_cmd'] += ' -s %s' % self.config['sysroot']
         if self.config['chroot']:
-            self.config['sos_cmd'] += '-c %s ' % self.config['chroot']
+            self.config['sos_cmd'] += ' -c %s' % self.config['chroot']
         if self.config['compression']:
-            self.config['sos_cmd'] += '-z %s' % self.config['compression']
-        if self.config['cluster_type']:
-            self.config['cluster'].modify_sos_cmd()
+            self.config['sos_cmd'] += ' -z %s' % self.config['compression']
         self.log_debug('Initial sos cmd set to %s' % self.config['sos_cmd'])
 
     def connect_to_master(self):
@@ -373,7 +396,7 @@ this utility or remote systems that it connects to.
             self.master = SosNode(self.config['master'], self.config)
         except Exception as e:
             self.log_debug('Failed to connect to master: %s' % e)
-            self._exit('Could not connect to master node.\nAborting...')
+            self._exit('Could not connect to master node.\nAborting...', 1)
 
     def determine_cluster(self):
         '''This sets the cluster type and loads that cluster's cluster.
@@ -394,16 +417,13 @@ this utility or remote systems that it connects to.
                 self.log_info(
                     'Cluster type set to %s' % self.config['cluster_type'])
                 break
-                msg = ('Could not determine cluster cluster and no list of '
-                       'nodes was provided.\nAborting...'
-                       )
-                self._exit(msg, 1)
 
     def get_nodes_from_cluster(self):
         '''Collects the list of nodes from the determined cluster cluster'''
-        nodes = self.config['cluster']._get_nodes()
-        self.logger.info('Node list: %s' % nodes)
-        return nodes
+        if self.config['cluster_type']:
+            nodes = self.config['cluster']._get_nodes()
+            self.log_debug('Node list: %s' % nodes)
+            return nodes
 
     def reduce_node_list(self):
         '''Reduce duplicate entries of the localhost and/or master node
@@ -421,13 +441,14 @@ this utility or remote systems that it connects to.
                 if n == self.master.hostname or n == self.config['master']:
                     self.node_list.remove(n)
         self.node_list = list(set(n for n in self.node_list if n))
-        self.logger.info('Node list reduced to %s' % self.node_list)
+        self.log_debug('Node list reduced to %s' % self.node_list)
 
     def compare_node_to_regex(self, node):
         '''Compares a discovered node name to a provided list of nodes from
         the user. If there is not a match, the node is removed from the list'''
         for regex in self.config['nodes']:
             try:
+                regex = fnmatch.translate(regex)
                 if re.match(regex, node):
                     return True
             except re.error as err:
@@ -462,7 +483,7 @@ this utility or remote systems that it connects to.
         # force add any non-regex node strings from nodes option
         if self.config['nodes']:
             for node in self.config['nodes']:
-                if any(i in node for i in ('*', '\\', '?', '(', ')', '/')):
+                if any(i in node for i in '*\\?()/[]'):
                     continue
                 if node not in self.node_list:
                     self.log_debug("Force adding %s to node list" % node)
@@ -519,47 +540,54 @@ this utility or remote systems that it connects to.
         filters = [self.master.address, self.master.hostname]
         nodes = [n for n in self.node_list if n not in filters]
 
-        pool = ThreadPoolExecutor(self.config['threads'])
-        pool.map(self._connect_to_node, nodes, chunksize=1)
-        pool.shutdown(wait=True)
-
-        self.report_num = len(self.client_list)
-
-        self.console.info("\nBeginning collection of sosreports from %s nodes,"
-                          " collecting a maximum of %s concurrently\n"
-                          % (len(self.client_list), self.config['threads']))
-
         try:
+            pool = ThreadPoolExecutor(self.config['threads'])
+            pool.map(self._connect_to_node, nodes, chunksize=1)
+            pool.shutdown(wait=True)
+
+            self.report_num = len(self.client_list)
+            if self.config['no_local'] and self.master.address == 'localhost':
+                self.report_num -= 1
+
+            self.console.info("\nBeginning collection of sosreports from %s "
+                              "nodes, collecting a maximum of %s "
+                              "concurrently\n"
+                              % (self.report_num, self.config['threads'])
+                              )
+
             pool = ThreadPoolExecutor(self.config['threads'])
             pool.map(self._collect, self.client_list, chunksize=1)
             pool.shutdown(wait=True)
         except KeyboardInterrupt:
-            self.console.error(' Keyboard interrupt\n')
-            os._exit(1)
+            self.log_error('Exiting on user cancel\n')
+            os._exit(130)
 
         if hasattr(self.config['cluster'], 'run_extra_cmd'):
             self.console.info('Collecting additional data from master node...')
-            f = self.config['cluster'].run_extra_cmd()
-            if f:
-                self.master.collect_extra_cmd(f)
+            files = self.config['cluster']._run_extra_cmd()
+            if files:
+                self.master.collect_extra_cmd(files)
         msg = '\nSuccessfully captured %s of %s sosreports'
         self.log_info(msg % (self.retrieved, self.report_num))
         if self.retrieved > 0:
             self.create_cluster_archive()
         else:
             msg = 'No sosreports were collected, nothing to archive...'
-            self._exit(msg)
+            self._exit(msg, 1)
         self.close_all_connections()
 
     def _collect(self, client):
         '''Runs sosreport on each node'''
-        if not client.local:
-            client.sosreport()
-        else:
-            if not self.config['no_local']:
+        try:
+            if not client.local:
                 client.sosreport()
-        if client.retrieved:
-            self.retrieved += 1
+            else:
+                if not self.config['no_local']:
+                    client.sosreport()
+            if client.retrieved:
+                self.retrieved += 1
+        except Exception as err:
+            self.log_error("Error running sosreport: %s" % err)
 
     def close_all_connections(self):
         '''Close all ssh sessions for nodes'''
@@ -595,7 +623,7 @@ this utility or remote systems that it connects to.
                 tar.close()
         except Exception as e:
             msg = 'Could not create archive: %s' % e
-            self._exit(msg)
+            self._exit(msg, 2)
 
     def cleanup(self):
         ''' Removes the tmp dir and all sosarchives therein.

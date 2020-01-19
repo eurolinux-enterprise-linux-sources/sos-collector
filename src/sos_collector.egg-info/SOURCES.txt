@@ -15,3 +15,5 @@ soscollector/clusters/__init__.py
 soscollector/clusters/kubernetes.py
 soscollector/clusters/ovirt.py
 soscollector/clusters/pacemaker.py
+soscollector/hosts/__init__.py
+soscollector/hosts/redhat.py

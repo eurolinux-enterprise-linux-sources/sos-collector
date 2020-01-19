@@ -18,23 +18,16 @@ from soscollector.clusters import Cluster
 
 class kubernetes(Cluster):
 
+    packages = ('kubernetes-master',)
     sos_plugins = ['kubernetes']
-    sos_options = {'kubernetes.all': 'on'}
+    sos_plugin_options = {'kubernetes.all': 'on'}
+
+    cmd = 'kubectl'
 
     option_list = [
-        ('label', '', 'Restrict nodes to those with matching label')
+        ('label', '', 'Filter node list to those with matching label'),
+        ('role', '', 'Filter node list to those with matching role')
     ]
-
-    def check_enabled(self):
-        if self.is_installed('atomic-openshift-master'):
-            self.cluster_type = 'openshift'
-            self.cmd = 'oc'
-            return True
-        elif self.is_installed('kubernetes-master'):
-            self.cmd = 'kubectl'
-            return True
-        else:
-            return False
 
     def get_nodes(self):
         self.cmd += ' get nodes'
@@ -42,8 +35,22 @@ class kubernetes(Cluster):
             self.cmd += ' -l %s ' % self.get_option('label')
         res = self.exec_master_cmd(self.cmd)
         if res['status'] == 0:
-            nodes = [node.split()[0] for node in res['stdout'].splitlines()]
-            nodes.remove("NAME")
+            nodes = []
+            roles = [x for x in self.get_option('role').split(',') if x]
+            for nodeln in res['stdout'].splitlines()[1:]:
+                node = nodeln.split()
+                if not roles:
+                    nodes.append(node[0])
+                else:
+                    if node[2] in roles:
+                        nodes.append(node[0])
             return nodes
         else:
             raise Exception('Node enumeration did not return usable output')
+
+
+class openshift(kubernetes):
+
+    packages = ('atomic-openshift',)
+    sos_preset = 'ocp'
+    cmd = 'oc'

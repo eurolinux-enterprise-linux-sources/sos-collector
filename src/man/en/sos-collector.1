@@ -4,12 +4,15 @@
 sos-collector \- Collect sosreports from multiple (cluster) nodes
 .SH USAGE
 .B sos-collector
-    [\-a|\-\-all\-logs]
+    [\-a|\-\-all\-options]
+    [\-b|\-\-become]
+    [\-\-batch]
     [\-c CLUSTER_OPTIONS]
     [\-\-chroot CHROOT]
     [\-\-case\-id CASE_ID]
     [\-\-cluster\-type CLUSTER_TYPE]
     [\-e ENABLE_PLUGINS]
+    [\-\-insecure-sudo]
     [\-k PLUGIN_OPTION]
     [\-\-label LABEL]
     [\-n SKIP_PLUGINS]
@@ -20,12 +23,14 @@ sos-collector \- Collect sosreports from multiple (cluster) nodes
     [\-o ONLY_PLUGINS]
     [\-p SSH_PORT]
     [\-\-password PASSWORD]
+    [\-\-preset PRESET]
     [\-s|\-\-sysroot SYSROOT]
     [\-\-ssh\-user SSH_USER]
     [\-\-sos-cmd SOS_CMD]
     [\-t|\-\-threads THREADS]
     [\-\-timeout TIMEOUT]
     [\-\-tmp\-dir TMP_DIR]
+    [\-v|\-\-verbose]
     [\-\-verify]
     [\-z|\-\-compression-type COMPRESSION_TYPE]
 
@@ -48,6 +53,12 @@ Enables all sosreport options.
 
 This does NOT enable all sos-collector options.
 .TP
+\fB\-b\fR, \fB\-\-become\fR
+Become the root user on the remote node when connecting as a non-root user.
+.TP
+\fB\-\-batch\fR
+Run in non-interactive mode. This will skip prompts for user input, with the
+exception of a prompt for the SSH password.
 \fB\-\-all\-logs\fR
 Sosreport option. Collects all logs regardless of size. 
 
@@ -86,6 +97,13 @@ Sosreport option. Use this to enable a plugin that would otherwise not be run.
 
 This option supports providing a comma-delimited list of plugins.
 .TP
+\fB\-\-insecure-sudo\fR
+Use this option when connecting as a non-root user that has passwordless sudo
+configured.
+
+If this option is omitted and a bogus sudo password is supplied, collection of
+sosreports may exhibit unexpected behavior and/or fail entirely.
+.TP
 \fB\-k\fR PLUGIN_OPTION, \fB\-\-plugin\-option\fR PLUGIN_OPTION
 Sosreport option. Set a plugin option to a particular value. This takes the form of
 plugin_name.option_name=value.
@@ -106,9 +124,12 @@ This is useful if a particular plugin is prone to hanging for one reason or anot
 This option supports providing a comma-delimited list of plugins.
 .TP
 \fB\-\-nodes\fR NODES
-Provide a comma-delimited list of nodes to collect sosreports from.
+Provide a comma-delimited list of nodes to collect sosreports from, or a regex string to
+be used to compare discovered node names against. If using a regex, only nodes matching the regex
+will be used - i.e. it can be used as a whitelist but not a blacklist.
 
-Providing this option causes a cluster's profile to not discover a list of nodes on its own.
+This option can be handed multiple regex strings separated by commas. Additionally, both whole node
+names/addresses and regex strings may be provided at the same time.
 .TP
 \fB\-\-no\-pkg\-check\fR
 Do not perform package checks. Most cluster profiles check against installed packages to determine
@@ -144,6 +165,14 @@ that will be used to connect to all nodes.
 
 If you have differing passwords for the same user across cluster nodes, you should
 deploy SSH keys.
+.TP
+\fB\-\-preset\fR PRESET
+Specify a sos preset to use, note that this requires sos-3.6 or later to be installed
+on the node. The given preset must also exist on the remote node - local presets
+are not used.
+
+If \fB\-\-preset\fR is specified and a given node either does not have that preset
+defined, or has a version of sos prior to 3.6, this option is ignored for that node.
 .TP
 \fB\-p\fR SSH_PORT, \fB\-\-ssh\-port\fR SSH_PORT
 Specify SSH port for all nodes. Use this if SSH runs on any port other than 22.
@@ -187,6 +216,9 @@ Specify a temporary directory to save sos archives to. By default one will be cr
 /tmp and then removed after sos-collector has finished running.
 
 This is NOT the same as specifying a temporary directory for sosreport on the remote nodes.
+.TP
+\fB\-v\fR \fB\-\-verbose\fR
+Print debug information to screen.
 .TP
 \fB\-\-verfiy\fR
 Sosreport option. Passes the "--verify" option to sosreport on the nodes which 

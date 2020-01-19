@@ -23,7 +23,9 @@ class Cluster():
 
     option_list = []
     packages = ('',)
-    sos_options = {}
+    sos_plugins = []
+    sos_plugin_options = {}
+    sos_preset = ''
 
     def __init__(self, config):
         '''This is the class that cluster profile should subclass in order to
@@ -40,7 +42,6 @@ class Cluster():
         self.config = config
         self.cluster_type = self.__class__.__name__
         self.node_list = None
-        sos_plugins = []
         self.logger = logging.getLogger('sos_collector')
         self.console = logging.getLogger('sos_collector_console')
         self.options = []
@@ -55,7 +56,7 @@ class Cluster():
             self.options.append(option)
 
     def _fmt_msg(self, msg):
-        return '[ %s ] %s' % (self.cluster_type, msg)
+        return '[%s] %s' % (self.cluster_type, msg)
 
     def log_info(self, msg):
         '''Used to print info messages'''
@@ -70,7 +71,13 @@ class Cluster():
     def log_debug(self, msg):
         '''Used to print debug messages'''
         self.logger.debug(self._fmt_msg(msg))
-        self.console.debug(self._fmt_msg(msg))
+        if self.config['verbose']:
+            self.console.debug(self._fmt_msg(msg))
+
+    def log_warn(self, msg):
+        '''Used to print warning messages'''
+        self.logger.warn(self._fmt_msg(msg))
+        self.console.warn(msg)
 
     def get_option(self, option):
         '''This is used to by clusters to check if a cluster option was
@@ -81,25 +88,12 @@ class Cluster():
                 return opt.value
         return False
 
-    def is_installed(self, pkg):
-        '''Checks to see if a package is installed'''
-        cmd = self.master.host_facts['package_manager']['query'] + pkg
-        res = self.exec_master_cmd(cmd)
-        if res['status'] == 0:
-            return True
-        return False
-
-    def exec_master_cmd(self, cmd):
+    def exec_master_cmd(self, cmd, need_root=False):
         '''Used to retrieve output from a (master) node in a cluster'''
-        if self.config['need_sudo']:
-            cmd = "sudo -S %s" % cmd
-        if self.config['become_root']:
-            cmd = "su -c '%s'" % cmd
         self.logger.debug('Running %s on %s' % (cmd, self.master.address))
-        res = self.master.run_command(cmd, get_pty=True)
+        res = self.master.run_command(cmd, get_pty=True, need_root=need_root)
         if res['stdout']:
-            if 'password' in res['stdout'][0].lower():
-                res['stdout'].pop(0)
+            res['stdout'] = res['stdout'].replace('Password:', '')
         return res
 
     def setup(self):
@@ -108,46 +102,6 @@ class Cluster():
         thus get_nodes() would not be called
         '''
         pass
-
-    def get_sos_path_strip(self, facts):
-        '''This calls set_sos_path_strip that is used by clusters to determine
-        if we need to remove a particular string from a returned sos path for
-        any reason
-        '''
-        return self.set_sos_path_strip(facts)
-
-    def set_sos_path_strip(self, facts):
-        '''This may be overriden by a cluster and used to set
-        a string to be stripped from the return sos path if needed.
-
-        For example, on Atomic Host, the sosreport gets written under
-        /host/var/tmp in the container, but is available to scp under the
-        standard /var/tmp after the container exits.
-
-        If a cluster overrides this, it will need to be known if it needs to be
-        sensitive to cluster nodes being Atomic Hosts.
-        '''
-        if facts['atomic']:
-            return '/host'
-
-    def get_cleanup_cmd(self, facts):
-        '''This calls set_cleanup_cmd that is used by clusers to determine if
-        sos-collector needs to do additional cleanup on a node
-        '''
-        return self.set_cleanup_cmd(facts)
-
-    def set_cleanup_cmd(self, facts):
-        '''This should be overridden by a cluster and used to set an additional
-        command to run during cleanup.
-
-        The cluster should return a string containing the full cleanup
-        command to run
-
-        If a cluster overrides this, it will need to be known if the the
-        cluster needs to be sensitive to cluster nodes being Atomic Hosts.
-        '''
-        if facts['atomic']:
-            return 'docker rm sos-collector-tmp'
 
     def check_enabled(self):
         '''This may be overridden by clusters
@@ -159,7 +113,7 @@ class Cluster():
         Only the first cluster type to determine a match is run
         '''
         for pkg in self.packages:
-            if self.is_installed(pkg):
+            if self.master.is_installed(pkg):
                 return True
         return False
 
@@ -174,16 +128,16 @@ class Cluster():
         try:
             return self.format_node_list()
         except Exception as e:
-            self.logger.error('Failed to get node list: %s' % e)
-            raise
+            self.log_debug('Failed to get node list: %s' % e)
+            return []
 
-    def get_node_label(self, facts):
+    def get_node_label(self, node):
         '''Used by SosNode() to retrieve the appropriate label from the cluster
         as set by set_node_label() in the cluster profile.
         '''
-        return self.set_node_label(facts)
+        return self.set_node_label(node)
 
-    def set_node_label(self, facts):
+    def set_node_label(self, node):
         '''This may be overridden by clusters.
 
         If there is a distinction between masters and nodes, or types of nodes,
@@ -199,14 +153,21 @@ class Cluster():
 
         This will NOT override user supplied options.
         '''
+        if self.sos_preset:
+            if not self.config['preset']:
+                self.config['preset'] = self.sos_preset
+            else:
+                self.log_debug('Cluster specified preset %s but user has also '
+                               'defined a preset. Using user specification.'
+                               % self.sos_preset)
         if self.sos_plugins:
             for plug in self.sos_plugins:
                 if plug not in self.config['sos_cmd']:
                     self.config['enable_plugins'].append(plug)
-        if self.sos_options:
-            for opt in self.sos_options:
+        if self.sos_plugin_options:
+            for opt in self.sos_plugin_options:
                 if not any(opt in o for o in self.config['plugin_options']):
-                    option = '%s=%s' % (opt, self.sos_options[opt])
+                    option = '%s=%s' % (opt, self.sos_plugin_options[opt])
                     self.config['plugin_options'].append(option)
 
     def format_node_list(self):
@@ -229,3 +190,24 @@ class Cluster():
             if node.startswith(('-', '_', '(', ')', '[', ']', '/', '\\')):
                 node_list.remove(node)
         return node_list
+
+    def _run_extra_cmd(self):
+        '''Ensures that any files returned by a cluster's run_extra_cmd()
+        method are properly typed as a list for iterative collection. If any
+        of the files are an additional sosreport (e.g. the ovirt db dump) then
+        the md5 sum file is automatically added to the list
+        '''
+        files = []
+        try:
+            res = self.run_extra_cmd()
+            if res:
+                if not isinstance(res, list):
+                    res = [res]
+                for extra_file in res:
+                    extra_file = extra_file.strip()
+                    files.append(extra_file)
+                    if 'sosreport' in extra_file:
+                        files.append(extra_file + '.md5')
+        except AttributeError:
+            pass
+        return files

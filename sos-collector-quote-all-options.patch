@@ -1,0 +1,247 @@
+From c09e36927f74f955a325381a7d611ea270d04b65 Mon Sep 17 00:00:00 2001
+From: Jake Hunsaker <jhunsake@redhat.com>
+Date: Tue, 13 Nov 2018 12:30:45 -0500
+Subject: [PATCH] [global] Quote options locally everywhere
+
+An earlier commit passed cluster option values through pipes.quote() in
+an effort to prevent command injection on the remote nodes, however this
+did not capture every avenue through which a maliciously designed option
+value or sos command could take.
+
+Now, quote the option values at the time of use, and also quote any sos
+option that isn't an on/off toggle.
+
+Additionally, re-work how the ovirt/rhv database query is quoted and
+filter out cluster/datacenter values that are likely to contain SQL
+code, since we cannot rely on the driver to do this since we don't have
+an actual connection to the database.
+
+Original discovery of issues and patch work thanks to Riccardo Schirone.
+
+Signed-off-by: Jake Hunsaker <jhunsake@redhat.com>
+---
+ soscollector/clusters/kubernetes.py |  3 ++-
+ soscollector/clusters/ovirt.py      | 32 ++++++++++++++++++++++-------
+ soscollector/configuration.py       |  2 +-
+ soscollector/sos_collector.py       | 19 +++++++++--------
+ soscollector/sosnode.py             | 13 ++++++------
+ 5 files changed, 46 insertions(+), 23 deletions(-)
+
+diff --git a/soscollector/clusters/kubernetes.py b/soscollector/clusters/kubernetes.py
+index 6c519f3..c5c2094 100644
+--- a/soscollector/clusters/kubernetes.py
++++ b/soscollector/clusters/kubernetes.py
+@@ -13,6 +13,7 @@
+ # with this program; if not, write to the Free Software Foundation, Inc.,
+ # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
++from pipes import quote
+ from soscollector.clusters import Cluster
+ 
+ 
+@@ -32,7 +33,7 @@ class kubernetes(Cluster):
+     def get_nodes(self):
+         self.cmd += ' get nodes'
+         if self.get_option('label'):
+-            self.cmd += ' -l %s ' % self.get_option('label')
++            self.cmd += ' -l %s ' % quote(self.get_option('label'))
+         res = self.exec_master_cmd(self.cmd)
+         if res['status'] == 0:
+             nodes = []
+diff --git a/soscollector/clusters/ovirt.py b/soscollector/clusters/ovirt.py
+index 1c44c97..0a074ca 100644
+--- a/soscollector/clusters/ovirt.py
++++ b/soscollector/clusters/ovirt.py
+@@ -16,6 +16,7 @@
+ import os
+ import fnmatch
+ 
++from pipes import quote
+ from soscollector.clusters import Cluster
+ from getpass import getpass
+ 
+@@ -31,6 +32,22 @@ class ovirt(Cluster):
+         ('no-hypervisors', False, 'Do not collect from hypervisors')
+     ]
+ 
++    def _sql_scrub(self, val):
++        '''
++        Manually sanitize SQL queries since we can't leave this up to the
++        driver since we do not have an actual DB connection
++        '''
++        if not val:
++            return '%'
++
++        invalid_chars = ['\x00', '\\', '\n', '\r', '\032', '"', '\'']
++        if any(x in invalid_chars for x in val):
++            self.log_warn("WARNING: Cluster option \'%s\' contains invalid "
++                          "characters. Using '%%' instead." % val)
++            return '%'
++
++        return val
++
+     def setup(self):
+         self.pg_pass = False
+         if not self.get_option('no-database'):
+@@ -38,13 +55,14 @@ class ovirt(Cluster):
+         self.format_db_cmd()
+ 
+     def format_db_cmd(self):
+-        cluster = self.get_option('cluster') or '%'
+-        datacenter = self.get_option('datacenter') or '%'
+-        self.dbcmd = '/usr/share/ovirt-engine/dbscripts/engine-psql.sh -c \"'
+-        self.dbcmd += ("select host_name from vds_static where cluster_id in "
+-                       "(select cluster_id from cluster where name like \'%s\'"
+-                       " and storage_pool_id in (select id from storage_pool "
+-                       "where name like \'%s\'))\"" % (cluster, datacenter))
++        cluster = self._sql_scrub(self.get_option('cluster'))
++        datacenter = self._sql_scrub(self.get_option('datacenter'))
++        query = ("select host_name from vds_static where cluster_id in "
++                 "(select cluster_id from cluster where name like '%s'"
++                 " and storage_pool_id in (select id from storage_pool "
++                 "where name like '%s'))" % (cluster, datacenter))
++        self.dbcmd = ('/usr/share/ovirt-engine/dbscripts/engine-psql.sh '
++                      '-c {}'.format(quote(query)))
+         self.log_debug('Query command for ovirt DB set to: %s' % self.dbcmd)
+ 
+     def get_nodes(self):
+diff --git a/soscollector/configuration.py b/soscollector/configuration.py
+index ea33835..7f2c3c7 100644
+--- a/soscollector/configuration.py
++++ b/soscollector/configuration.py
+@@ -138,7 +138,7 @@ class Configuration(dict):
+                 try:
+                     # there are no instances currently where any cluster option
+                     # should contain a legitimate space.
+-                    value = pipes.quote(option.split('=')[1].split()[0])
++                    value = option.split('=')[1].split()[0]
+                 except IndexError:
+                     # conversion to boolean is handled during validation
+                     value = 'True'
+diff --git a/soscollector/sos_collector.py b/soscollector/sos_collector.py
+index 70a3dc8..7331f63 100644
+--- a/soscollector/sos_collector.py
++++ b/soscollector/sos_collector.py
+@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
+ from .sosnode import SosNode
+ from distutils.sysconfig import get_python_lib
+ from getpass import getpass
++from pipes import quote
+ from six.moves import input
+ from textwrap import fill
+ from soscollector import __version__
+@@ -360,32 +361,34 @@ this utility or remote systems that it connects to.
+     def configure_sos_cmd(self):
+         '''Configures the sosreport command that is run on the nodes'''
+         if self.config['sos_opt_line']:
+-            filt = ['&', '|', '>', '<']
++            filt = ['&', '|', '>', '<', ';']
+             if any(f in self.config['sos_opt_line'] for f in filt):
+                 self.log_warn('Possible shell script found in provided sos '
+                               'command. Ignoring --sos-cmd option entirely.')
+                 self.config['sos_opt_line'] = None
+             else:
+                 self.config['sos_cmd'] = '%s %s' % (
+-                    self.config['sos_cmd'], self.config['sos_opt_line'])
++                    self.config['sos_cmd'], quote(self.config['sos_opt_line']))
+                 self.log_debug("User specified manual sosreport command. "
+                                "Command set to %s" % self.config['sos_cmd'])
+                 return True
+         if self.config['case_id']:
+-            self.config['sos_cmd'] += ' --case-id=%s' % self.config['case_id']
++            self.config['sos_cmd'] += ' --case-id=%s' % (
++                quote(self.config['case_id']))
+         if self.config['alloptions']:
+             self.config['sos_cmd'] += ' --alloptions'
+         if self.config['verify']:
+             self.config['sos_cmd'] += ' --verify'
+         if self.config['log_size']:
+             self.config['sos_cmd'] += (' --log-size=%s'
+-                                       % self.config['log_size'])
++                                       % quote(self.config['log_size']))
+         if self.config['sysroot']:
+-            self.config['sos_cmd'] += ' -s %s' % self.config['sysroot']
++            self.config['sos_cmd'] += ' -s %s' % quote(self.config['sysroot'])
+         if self.config['chroot']:
+-            self.config['sos_cmd'] += ' -c %s' % self.config['chroot']
++            self.config['sos_cmd'] += ' -c %s' % quote(self.config['chroot'])
+         if self.config['compression']:
+-            self.config['sos_cmd'] += ' -z %s' % self.config['compression']
++            self.config['sos_cmd'] += ' -z %s' % (
++                quote(self.config['compression']))
+         self.log_debug('Initial sos cmd set to %s' % self.config['sos_cmd'])
+ 
+     def connect_to_master(self):
+@@ -408,7 +411,7 @@ this utility or remote systems that it connects to.
+         can still be run if the user sets a --cluster-type manually
+         '''
+         checks = list(self.clusters.values())
+-        for cluster in checks:
++        for cluster in self.clusters.values():
+             checks.remove(cluster)
+             cluster.master = self.master
+             if cluster.check_enabled():
+diff --git a/soscollector/sosnode.py b/soscollector/sosnode.py
+index fde1e6a..3790433 100644
+--- a/soscollector/sosnode.py
++++ b/soscollector/sosnode.py
+@@ -26,6 +26,7 @@ import six
+ import time
+ 
+ from distutils.version import LooseVersion
++from pipes import quote
+ from subprocess import Popen, PIPE
+ 
+ 
+@@ -450,7 +451,7 @@ class SosNode():
+ 
+         label = self.determine_sos_label()
+         if label:
+-            self.sos_cmd = ' %s %s' % (self.sos_cmd, label)
++            self.sos_cmd = ' %s %s' % (self.sos_cmd, quote(label))
+ 
+         if self.config['sos_opt_line']:
+             return True
+@@ -464,7 +465,7 @@ class SosNode():
+                                'enabled but do not exist' % not_only)
+             only = self._fmt_sos_opt_list(self.config['only_plugins'])
+             if only:
+-                self.sos_cmd += ' --only-plugins=%s' % only
++                self.sos_cmd += ' --only-plugins=%s' % quote(only)
+             return True
+ 
+         if self.config['skip_plugins']:
+@@ -477,7 +478,7 @@ class SosNode():
+                                'already not enabled' % not_skip)
+             skipln = self._fmt_sos_opt_list(skip)
+             if skipln:
+-                self.sos_cmd += ' --skip-plugins=%s' % skipln
++                self.sos_cmd += ' --skip-plugins=%s' % quote(skipln)
+ 
+         if self.config['enable_plugins']:
+             # only run enable for plugins that are disabled
+@@ -490,18 +491,18 @@ class SosNode():
+                                'are already enabled or do not exist' % not_on)
+             enable = self._fmt_sos_opt_list(opts)
+             if enable:
+-                self.sos_cmd += ' --enable-plugins=%s' % enable
++                self.sos_cmd += ' --enable-plugins=%s' % quote(enable)
+ 
+         if self.config['plugin_options']:
+             opts = [o for o in self.config['plugin_options']
+                     if self._plugin_exists(o.split('.')[0])
+                     and self._plugin_option_exists(o.split('=')[0])]
+             if opts:
+-                self.sos_cmd += ' -k %s' % ','.join(o for o in opts)
++                self.sos_cmd += ' -k %s' % quote(','.join(o for o in opts))
+ 
+         if self.config['preset']:
+             if self._preset_exists(self.config['preset']):
+-                self.sos_cmd += ' --preset=%s' % self.config['preset']
++                self.sos_cmd += ' --preset=%s' % quote(self.config['preset'])
+             else:
+                 self.log_debug('Requested to enable preset %s but preset does '
+                                'not exist on node' % self.config['preset'])
+-- 
+2.17.2
+

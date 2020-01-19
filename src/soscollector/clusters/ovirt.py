@@ -22,8 +22,7 @@ from getpass import getpass
 
 class ovirt(Cluster):
 
-    packages = ('ovirt-engine', 'rhevm')
-    sos_plugins = ['ovirt']
+    packages = ('ovirt-engine',)
 
     option_list = [
         ('no-database', False, 'Do not collect a database dump'),
@@ -39,23 +38,19 @@ class ovirt(Cluster):
         self.format_db_cmd()
 
     def format_db_cmd(self):
-        self.dbcmd = '/usr/share/ovirt-engine/dbscripts/engine-psql.sh -c '
-        self.dbcmd += '"select host_name from vds_static "'
-        if self.get_option('cluster'):
-            self.dbcmd += ('" where cluster_id = (select '
-                           'cluster_id from cluster where name = \'%s\')"'
-                           % self.get_option('cluster'))
-        if self.get_option('datacenter'):
-            self.dbcmd += ('"where cluster_id = (select cluster_id from '
-                           'cluster where storage_pool_id = (select id from '
-                           'storage_pool where name = \'%s\')) "'
-                           % self.get_option('datacenter'))
+        cluster = self.get_option('cluster') or '%'
+        datacenter = self.get_option('datacenter') or '%'
+        self.dbcmd = '/usr/share/ovirt-engine/dbscripts/engine-psql.sh -c \"'
+        self.dbcmd += ("select host_name from vds_static where cluster_id in "
+                       "(select cluster_id from cluster where name like \'%s\'"
+                       " and storage_pool_id in (select id from storage_pool "
+                       "where name like \'%s\'))\"" % (cluster, datacenter))
         self.log_debug('Query command for ovirt DB set to: %s' % self.dbcmd)
 
     def get_nodes(self):
         if self.get_option('no-hypervisors'):
             return []
-        res = self.exec_master_cmd(self.dbcmd)
+        res = self.exec_master_cmd(self.dbcmd, need_root=True)
         if res['status'] == 0:
             nodes = res['stdout'].splitlines()[2:-1]
             return [n.split('(')[0].strip() for n in nodes]
@@ -63,30 +58,26 @@ class ovirt(Cluster):
             raise Exception('database query failed, return code: %s'
                             % res['status'])
 
-    def set_node_label(self, facts):
-        if facts['address'] == self.master.address:
-            return 'manager'
-        if 'hypervisor' in facts['release']:
-            return 'rhvh'
-        else:
-            return 'rhelh'
-
     def run_extra_cmd(self):
-        if not self.get_option('no-database'):
+        if not self.get_option('no-database') and self.conf:
             return self.collect_database()
         return False
 
     def parse_db_conf(self):
         conf = {}
         engconf = '/etc/ovirt-engine/engine.conf.d/10-setup-database.conf'
-        res = self.exec_master_cmd('cat %s' % engconf)
+        res = self.exec_master_cmd('cat %s' % engconf, need_root=True)
         if res['status'] == 0:
             config = res['stdout'].splitlines()
-        for line in config:
-            k = str(line.split('=')[0])
-            v = str(line.split('=')[1].replace('"', ''))
-            conf[k] = v
-        return conf
+            for line in config:
+                try:
+                    k = str(line.split('=')[0])
+                    v = str(line.split('=')[1].replace('"', ''))
+                    conf[k] = v
+                except IndexError:
+                    pass
+            return conf
+        return False
 
     def collect_database(self):
         sos_opt = (
@@ -103,9 +94,23 @@ class ovirt(Cluster):
         cmd = ('PGPASSWORD={} /usr/sbin/sosreport --name=postgresql '
                '--batch -o postgresql {}'
                ).format(self.conf['ENGINE_DB_PASSWORD'], sos_opt)
-        db_sos = self.exec_master_cmd(cmd)
+        db_sos = self.exec_master_cmd(cmd, need_root=True)
         for line in db_sos['stdout'].splitlines():
             if fnmatch.fnmatch(line, '*sosreport-*tar*'):
                 return line.strip()
         self.log_error('Failed to gather database dump')
         return False
+
+
+class rhv(ovirt):
+
+    packages = ('rhevm', 'rhvm')
+    sos_preset = 'rhv'
+
+    def set_node_label(self, node):
+        if node.address == self.master.address:
+            return 'manager'
+        if node.is_installed('ovirt-node-ng-nodectl'):
+            return 'rhvh'
+        else:
+            return 'rhelh'

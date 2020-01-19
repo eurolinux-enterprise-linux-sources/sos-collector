@@ -13,9 +13,13 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+import inspect
+import os
+import pipes
 import re
 import six
 import socket
+import sys
 
 
 class Configuration(dict):
@@ -29,14 +33,16 @@ class Configuration(dict):
         self.parse_options()
         self.check_user_privs()
         self.parse_node_strings()
+        self['host_types'] = self._load_supported_hosts()
+        self['cluster_types'] = self._load_clusters()
 
     def set_defaults(self):
         self['sos_mod'] = {}
         self['master'] = ''
         self['strip_sos_path'] = ''
-        self['ssh_port'] = '22'
+        self['ssh_port'] = 22
         self['ssh_user'] = 'root'
-        self['sos_cmd'] = '/usr/sbin/sosreport --batch '
+        self['sos_cmd'] = 'sosreport --batch'
         self['no_local'] = False
         self['tmp_dir'] = None
         self['out_dir'] = '/var/tmp/'
@@ -55,7 +61,7 @@ class Configuration(dict):
         self['hostname'] = socket.gethostname()
         ips = [i[4][0] for i in socket.getaddrinfo(socket.gethostname(), None)]
         self['ip_addrs'] = list(set(ips))
-        self['cluster_options'] = ''
+        self['cluster_options'] = []
         self['image'] = None
         self['skip_plugins'] = []
         self['enable_plugins'] = []
@@ -73,6 +79,12 @@ class Configuration(dict):
         self['chroot'] = ''
         self['sysroot'] = ''
         self['sos_opt_line'] = ''
+        self['batch'] = False
+        self['verbose'] = False
+        self['preset'] = ''
+        self['insecure_sudo'] = False
+        self['log_size'] = 0
+        self['host_types'] = []
 
     def parse_node_strings(self):
         '''
@@ -96,7 +108,10 @@ class Configuration(dict):
                 try:
                     pos = idx
                     reg = node[start:idx]
-                    re.compile(reg)
+                    re.compile(re.escape(reg))
+                    # make sure we aren't splitting a regex value
+                    if '[' in reg and ']' not in reg:
+                        continue
                     nodes.append(reg.lstrip(','))
                     start = idx
                 except re.error:
@@ -109,18 +124,25 @@ class Configuration(dict):
         for k in self.args:
             if self.args[k]:
                 self[k] = self.args[k]
+        if self['sos_opt_line']:
+            self['sos_opt_line'] = pipes.quote(self['sos_opt_line'])
 
     def parse_cluster_options(self):
         opts = []
+        if not isinstance(self['cluster_options'], list):
+            self['cluster_options'] = [self['cluster_options']]
         if self['cluster_options']:
-            for opt in self['cluster_options'].split(','):
-                cluster = opt.split('.')[0]
-                name = opt.split('.')[1].split('=')[0]
+            for option in self['cluster_options']:
+                cluster = option.split('.')[0]
+                name = option.split('.')[1].split('=')[0]
                 try:
-                    value = opt.split('=')[1]
+                    # there are no instances currently where any cluster option
+                    # should contain a legitimate space.
+                    value = pipes.quote(option.split('=')[1].split()[0])
                 except IndexError:
                     # conversion to boolean is handled during validation
                     value = 'True'
+
                 opts.append(
                     ClusterOption(name, value, value.__class__, cluster)
                 )
@@ -141,6 +163,71 @@ class Configuration(dict):
     def check_user_privs(self):
         if not self['ssh_user'] == 'root':
             self['need_sudo'] = True
+
+    def _import_modules(self, modname):
+        '''Import and return all found classes in a module'''
+        mod_short_name = modname.split('.')[2]
+        module = __import__(modname, globals(), locals(), [mod_short_name])
+        modules = inspect.getmembers(module, inspect.isclass)
+        return modules
+
+    def _find_modules_in_path(self, path, modulename):
+        '''Given a path and a module name, find everything that can be imported
+        and then import it
+
+            path - the filesystem path of the package
+            modulename - the name of the module in the package
+
+        E.G. a path of 'clusters', and a modulename of 'ovirt' equates to
+        importing soscollector.clusters.ovirt
+        '''
+        modules = []
+        if os.path.exists(path):
+            for pyfile in sorted(os.listdir(path)):
+                if not pyfile.endswith('.py'):
+                    continue
+                if '__' in pyfile:
+                    continue
+                fname, ext = os.path.splitext(pyfile)
+                modname = 'soscollector.%s.%s' % (modulename, fname)
+                modules.extend(self._import_modules(modname))
+        return modules
+
+    def _load_modules(self, package, submod):
+        '''Helper to import cluster and host types'''
+        modules = []
+        for path in package.__path__:
+            if os.path.isdir(path):
+                modules.extend(self._find_modules_in_path(path, submod))
+        return modules
+
+    def _load_clusters(self):
+        '''Load an instance of each cluster so that sos-collector can later
+        determine what type of cluster is in use
+        '''
+        import soscollector.clusters
+        package = soscollector.clusters
+        supported_clusters = {}
+        clusters = self._load_modules(package, 'clusters')
+        for cluster in clusters:
+            if cluster[0] == 'Cluster':
+                continue
+            supported_clusters[cluster[0]] = cluster[1](self)
+        return supported_clusters
+
+    def _load_supported_hosts(self):
+        '''Load all the supported/defined host types for sos-collector.
+        These will then be used to match against each node we run on
+        '''
+        import soscollector.hosts
+        package = soscollector.hosts
+        supported_hosts = {}
+        hosts = self._load_modules(package, 'hosts')
+        for host in hosts:
+            if host[0] == 'SosHost':
+                continue
+            supported_hosts[host[0]] = host[1]
+        return supported_hosts
 
 
 class ClusterOption():

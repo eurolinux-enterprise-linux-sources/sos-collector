@@ -1,0 +1,113 @@
+From 998b7596c8aa7cccbcb94ebffe9fb72a4609bce4 Mon Sep 17 00:00:00 2001
+From: Bryan Quigley <bryan.quigley@canonical.com>
+Date: Mon, 15 Oct 2018 16:52:50 -0700
+Subject: [PATCH] [Hosts] Add Debian and Ubuntu as hosts
+
+Currently Debian and Ubuntu share a hosts file but we can further
+split them out if needed.
+
+Needed to define both a package name and bin path variable
+so that the differences between RH and U/D could be handled.
+
+Signed-off-by: Bryan Quigley <bryan.quigley@canonical.com>
+---
+ soscollector/hosts/__init__.py |  2 ++
+ soscollector/hosts/debian.py   | 36 ++++++++++++++++++++++++++++++++++++
+ soscollector/hosts/redhat.py   |  2 ++
+ soscollector/sosnode.py        |  4 ++--
+ 4 files changed, 42 insertions(+), 2 deletions(-)
+ create mode 100644 soscollector/hosts/debian.py
+
+diff --git a/soscollector/hosts/__init__.py b/soscollector/hosts/__init__.py
+index 02b1d71..2e93094 100644
+--- a/soscollector/hosts/__init__.py
++++ b/soscollector/hosts/__init__.py
+@@ -41,6 +41,8 @@ class SosHost():
+     container_runtime = None
+     container_image = None
+     sos_path_strip = None
++    sos_pkg_name = None  # package name in deb/rpm/etc
++    sos_bin_path = None  # path to sosreport binary
+ 
+     def __init__(self, address):
+         self.address = address
+diff --git a/soscollector/hosts/debian.py b/soscollector/hosts/debian.py
+new file mode 100644
+index 0000000..7b67c83
+--- /dev/null
++++ b/soscollector/hosts/debian.py
+@@ -0,0 +1,36 @@
++# Copyright Canonical 2018, Bryan Quigley <bryan.quigley@canonical.com>
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++# You should have received a copy of the GNU General Public License along
++# with this program; if not, write to the Free Software Foundation, Inc.,
++# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++
++from soscollector.hosts import SosHost
++
++
++class DebianHost(SosHost):
++    '''Base class for defining Debian based systems'''
++
++    distribution = 'Debian'
++    releases = ['ubuntu', 'debian']
++    package_manager = {
++        'name': 'dpkg',
++        'query': "dpkg-query -W -f='${Package}-${Version}\\\n' "
++    }
++    sos_pkg_name = 'sosreport'
++    sos_bin_path = '/usr/bin/sosreport'
++
++    def check_enabled(self, rel_string):
++        for release in self.releases:
++            if release in rel_string:
++                return True
++        return False
++# vim:ts=4 et sw=4
+diff --git a/soscollector/hosts/redhat.py b/soscollector/hosts/redhat.py
+index 20db16a..f077d03 100644
+--- a/soscollector/hosts/redhat.py
++++ b/soscollector/hosts/redhat.py
+@@ -26,6 +26,8 @@ class RedHatHost(SosHost):
+         'name': 'rpm',
+         'query': 'rpm -q'
+     }
++    sos_pkg_name = 'sos'
++    sos_bin_path = '/usr/sbin/sosreport'
+ 
+     def check_enabled(self, rel_string):
+         for release in self.releases:
+diff --git a/soscollector/sosnode.py b/soscollector/sosnode.py
+index 98f1765..fc674b0 100644
+--- a/soscollector/sosnode.py
++++ b/soscollector/sosnode.py
+@@ -154,7 +154,7 @@ class SosNode():
+     def _load_sos_info(self):
+         '''Queries the node for information about the installed version of sos
+         '''
+-        cmd = self.host.prefix + self.host.pkg_query('sos')
++        cmd = self.host.prefix + self.host.pkg_query(self.host.sos_pkg_name)
+         res = self.run_command(cmd)
+         if res['status'] == 0:
+             ver = res['stdout'].splitlines()[-1].split('-')[1]
+@@ -275,7 +275,7 @@ class SosNode():
+     def run_command(self, cmd, timeout=180, get_pty=False, need_root=False):
+         '''Runs a given cmd, either via the SSH session or locally'''
+         if cmd.startswith('sosreport'):
+-            cmd = cmd.replace('sosreport', '/usr/sbin/sosreport')
++            cmd = cmd.replace('sosreport', self.host.sos_bin_path)
+             need_root = True
+         if need_root:
+             get_pty = True
+-- 
+2.14.4
+
