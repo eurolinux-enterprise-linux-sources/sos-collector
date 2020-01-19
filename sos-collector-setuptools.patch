@@ -1,0 +1,13 @@
+diff --git a/setup.py b/setup.py
+index 407ff65..9399865 100644
+--- a/setup.py
++++ b/setup.py
+@@ -23,6 +23,7 @@ setup(
+     packages=find_packages(),
+     scripts=['sos-collector'],
+     data_files=[
+-        ('share/licenses/sos-collector', ['LICENSE']),
++        # Workaround setuptools difference between upstream & RHEL
++        # ('share/licenses/sos-collector', ['LICENSE']),
+         ('share/man/man1/', ['man/en/sos-collector.1'])
+     ])

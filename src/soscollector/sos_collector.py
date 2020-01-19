@@ -32,9 +32,11 @@ from concurrent.futures import ThreadPoolExecutor
 from .sosnode import SosNode
 from distutils.sysconfig import get_python_lib
 from getpass import getpass
+from pipes import quote
 from six.moves import input
 from textwrap import fill
 from soscollector import __version__
+from soscollector.exceptions import ControlPersistUnsupportedException
 
 
 class SosCollector():
@@ -48,13 +50,14 @@ class SosCollector():
         self.master = False
         self.retrieved = 0
         self.need_local_sudo = False
+        self.clusters = self.config['cluster_types']
         if not self.config['list_options']:
             try:
                 if not self.config['tmp_dir']:
                     self.create_tmp_dir()
                 self._setup_logging()
+                self._check_for_control_persist()
                 self.log_debug('Executing %s' % ' '.join(s for s in sys.argv))
-                self.clusters = self.config['cluster_types']
                 self.log_debug("Found cluster profiles: %s"
                                % self.clusters.keys())
                 self.log_debug("Found supported host types: %s"
@@ -63,8 +66,8 @@ class SosCollector():
                 self.prep()
             except KeyboardInterrupt:
                 self._exit('Exiting on user cancel', 130)
-        else:
-            self._load_clusters()
+            except Exception:
+                raise
 
     def _setup_logging(self):
         # behind the scenes logging
@@ -72,7 +75,8 @@ class SosCollector():
         self.logger.setLevel(logging.DEBUG)
         self.logfile = tempfile.NamedTemporaryFile(
             mode="w+",
-            dir=self.config['tmp_dir'])
+            dir=self.config['tmp_dir'],
+            delete=False)
         hndlr = logging.StreamHandler(self.logfile)
         hndlr.setFormatter(logging.Formatter(
             '%(asctime)s %(levelname)s: %(message)s'))
@@ -87,7 +91,8 @@ class SosCollector():
         self.console.setLevel(logging.DEBUG)
         self.console_log_file = tempfile.NamedTemporaryFile(
             mode="w+",
-            dir=self.config['tmp_dir'])
+            dir=self.config['tmp_dir'],
+            delete=False)
         chandler = logging.StreamHandler(self.console_log_file)
         cfmt = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
         chandler.setFormatter(cfmt)
@@ -102,6 +107,33 @@ class SosCollector():
         else:
             ui.setLevel(logging.INFO)
         self.console.addHandler(ui)
+
+    def _check_for_control_persist(self):
+        '''Checks to see if the local system supported SSH ControlPersist.
+
+        ControlPersist allows OpenSSH to keep a single open connection to a
+        remote host rather than building a new session each time. This is the
+        same feature that Ansible uses in place of paramiko, which we have a
+        need to drop in sos-collector.
+
+        This check relies on feedback from the ssh binary. The command being
+        run should always generate stderr output, but depending on what that
+        output reads we can determine if ControlPersist is supported or not.
+
+        For our purposes, a host that does not support ControlPersist is not
+        able to run sos-collector.
+
+        Returns
+            True if ControlPersist is supported, else raise Exception.
+        '''
+        ssh_cmd = ['ssh', '-o', 'ControlPersist']
+        cmd = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+        out, err = cmd.communicate()
+        err = err.decode('utf-8')
+        if 'Bad configuration option' in err or 'Usage:' in err:
+            raise ControlPersistUnsupportedException
+        return True
 
     def _exit(self, msg, error=1):
         '''Used to safely terminate if sos-collector encounters an error'''
@@ -118,15 +150,14 @@ class SosCollector():
         if self.config['cluster_options']:
             for opt in self.config['cluster_options']:
                 match = False
-                for option in self.clusters[opt.cluster].options:
-                    if opt.name == option.name:
-                        match = True
-                        # override the default from CLI
-                        option.value = self._validate_option(option, opt)
-                if not match:
-                    self._exit('Unknown option provided: %s.%s' % (
-                        opt.cluster, opt.name
-                    ))
+                for clust in self.clusters:
+                    for option in self.clusters[clust].options:
+                        if opt.name == option.name:
+                            match = True
+                            break
+            if not match:
+                self._exit('Unknown cluster option provided: %s.%s'
+                           % (opt.cluster, opt.name))
 
     def _validate_option(self, default, cli):
         '''Checks to make sure that the option given on the CLI is valid.
@@ -184,8 +215,19 @@ class SosCollector():
 
     def list_options(self):
         '''Display options for available clusters'''
+        _opts = {}
+        for _cluster in self.clusters:
+            for opt in self.clusters[_cluster].options:
+                if opt.name not in _opts.keys():
+                    _opts[opt.name] = opt
+                else:
+                    clust = _opts[opt.name].cluster
+                    if any(c in opt.cluster for c in clust):
+                        _opts[opt.name].cluster = ','.join(clust)
+                    else:
+                        _opts[opt.name] = opt
         print('\nThe following cluster options are available:\n')
-        print('{:15} {:15} {:<10} {:10} {:<}'.format(
+        print('{:25} {:15} {:<10} {:10} {:<}'.format(
             'Cluster',
             'Option Name',
             'Type',
@@ -193,16 +235,19 @@ class SosCollector():
             'Description'
         ))
 
-        for cluster in self.clusters:
-            for opt in self.clusters[cluster].options:
-                optln = '{:15} {:15} {:<10} {:<10} {:<10}'.format(
-                    opt.cluster,
-                    opt.name,
-                    opt.opt_type.__name__,
-                    str(opt.value),
-                    opt.description
-                )
-                print(optln)
+        for _opt in sorted(_opts, key=lambda x: _opts[x].cluster):
+            _clus = None
+            opt = _opts[_opt]
+            if isinstance(opt.cluster, list):
+                _clus = opt.cluster[0]
+            optln = '{:25} {:15} {:<10} {:<10} {:<10}'.format(
+                _clus or opt.cluster,
+                opt.name,
+                opt.opt_type.__name__,
+                str(opt.value),
+                opt.description
+            )
+            print(optln)
         print('\nOptions take the form of cluster.name=value'
               '\nE.G. "ovirt.no-database=True" or "pacemaker.offline=False"')
 
@@ -246,10 +291,9 @@ class SosCollector():
         '''Based on configuration, performs setup for collection'''
         disclaimer = ("""\
 This utility is used to collect sosreports from multiple \
-nodes simultaneously. It uses the python-paramiko library \
-to manage the SSH connections to remote systems. If this \
-library is not acceptable for use in your environment, \
-you should not use this utility.
+nodes simultaneously. It uses OpenSSH's ControlPersist feature \
+to connect to nodes and run commands remotely. If your system \
+installation of OpenSSH is older than 5.6, please upgrade.
 
 An archive of sosreport tarballs collected from the nodes will be \
 generated in %s and may be provided to an appropriate support representative.
@@ -264,7 +308,6 @@ this utility or remote systems that it connects to.
         self.console.info("\nsos-collector (version %s)\n" % __version__)
         intro_msg = self._fmt_msg(disclaimer % self.config['tmp_dir'])
         self.console.info(intro_msg)
-        self.configure_sos_cmd()
         prompt = "\nPress ENTER to continue, or CTRL-C to quit\n"
         if not self.config['batch']:
             input(prompt)
@@ -319,7 +362,12 @@ this utility or remote systems that it connects to.
                            'included.\nAborting...\n', 1)
 
         if self.config['cluster_type']:
-            self.config['cluster'] = self.clusters[self.config['cluster_type']]
+            if self.config['cluster_type'] == 'none':
+                self.config['cluster'] = self.clusters['jbon']
+            else:
+                self.config['cluster'] = self.clusters[
+                                            self.config['cluster_type']
+                                        ]
             self.config['cluster'].master = self.master
         else:
             self.determine_cluster()
@@ -332,6 +380,7 @@ this utility or remote systems that it connects to.
             self.config['cluster'].modify_sos_cmd()
         self.get_nodes()
         self.intro()
+        self.configure_sos_cmd()
 
     def intro(self):
         '''Prints initial messages and collects user and case if not
@@ -360,32 +409,34 @@ this utility or remote systems that it connects to.
     def configure_sos_cmd(self):
         '''Configures the sosreport command that is run on the nodes'''
         if self.config['sos_opt_line']:
-            filt = ['&', '|', '>', '<']
+            filt = ['&', '|', '>', '<', ';']
             if any(f in self.config['sos_opt_line'] for f in filt):
                 self.log_warn('Possible shell script found in provided sos '
                               'command. Ignoring --sos-cmd option entirely.')
                 self.config['sos_opt_line'] = None
             else:
                 self.config['sos_cmd'] = '%s %s' % (
-                    self.config['sos_cmd'], self.config['sos_opt_line'])
+                    self.config['sos_cmd'], quote(self.config['sos_opt_line']))
                 self.log_debug("User specified manual sosreport command. "
                                "Command set to %s" % self.config['sos_cmd'])
                 return True
         if self.config['case_id']:
-            self.config['sos_cmd'] += ' --case-id=%s' % self.config['case_id']
+            self.config['sos_cmd'] += ' --case-id=%s' % (
+                quote(self.config['case_id']))
         if self.config['alloptions']:
             self.config['sos_cmd'] += ' --alloptions'
         if self.config['verify']:
             self.config['sos_cmd'] += ' --verify'
         if self.config['log_size']:
             self.config['sos_cmd'] += (' --log-size=%s'
-                                       % self.config['log_size'])
+                                       % quote(self.config['log_size']))
         if self.config['sysroot']:
-            self.config['sos_cmd'] += ' -s %s' % self.config['sysroot']
+            self.config['sos_cmd'] += ' -s %s' % quote(self.config['sysroot'])
         if self.config['chroot']:
-            self.config['sos_cmd'] += ' -c %s' % self.config['chroot']
+            self.config['sos_cmd'] += ' -c %s' % quote(self.config['chroot'])
         if self.config['compression']:
-            self.config['sos_cmd'] += ' -z %s' % self.config['compression']
+            self.config['sos_cmd'] += ' -z %s' % (
+                quote(self.config['compression']))
         self.log_debug('Initial sos cmd set to %s' % self.config['sos_cmd'])
 
     def connect_to_master(self):
@@ -396,7 +447,7 @@ this utility or remote systems that it connects to.
             self.master = SosNode(self.config['master'], self.config)
         except Exception as e:
             self.log_debug('Failed to connect to master: %s' % e)
-            self._exit('Could not connect to master node.\nAborting...', 1)
+            self._exit('Could not connect to master node. Aborting...', 1)
 
     def determine_cluster(self):
         '''This sets the cluster type and loads that cluster's cluster.
@@ -407,12 +458,31 @@ this utility or remote systems that it connects to.
         If a list of nodes is given, this is not run, however the cluster
         can still be run if the user sets a --cluster-type manually
         '''
+        checks = list(self.clusters.values())
+        for cluster in self.clusters.values():
+            checks.remove(cluster)
+            cluster.master = self.master
+            if cluster.check_enabled():
+                cname = cluster.__class__.__name__
+                self.log_debug("Installation matches %s, checking for layered "
+                               "profiles" % cname)
+                for remaining in checks:
+                    if issubclass(remaining.__class__, cluster.__class__):
+                        rname = remaining.__class__.__name__
+                        self.log_debug("Layered profile %s found. "
+                                       "Checking installation"
+                                       % rname)
+                        remaining.master = self.master
+                        if remaining.check_enabled():
+                            self.log_debug("Installation matches both layered "
+                                           "profile %s and base profile %s, "
+                                           "setting cluster type to layered "
+                                           "profile" % (rname, cname))
+                            cluster = remaining
+                            break
 
-        for clus in self.clusters:
-            self.clusters[clus].master = self.master
-            if self.clusters[clus].check_enabled():
-                self.config['cluster'] = self.clusters[clus]
-                name = str(self.clusters[clus].__class__.__name__).lower()
+                self.config['cluster'] = cluster
+                name = str(cluster.__class__.__name__).lower()
                 self.config['cluster_type'] = name
                 self.log_info(
                     'Cluster type set to %s' % self.config['cluster_type'])
@@ -502,22 +572,6 @@ this utility or remote systems that it connects to.
         except (TypeError, ValueError):
             self.config['hostlen'] = len(self.config['master'])
 
-    def can_run_local_sos(self):
-        '''Check if sosreport can be run as the current user, or if we need
-        to invoke sudo'''
-        if os.geteuid() != 0:
-            self.log_debug('Not running as root. Need sudo for local sos')
-            self.need_local_sudo = True
-            msg = ('\nLocal sosreport requires root. Provide sudo password'
-                   'or press ENTER to skip: ')
-            self.local_sudopw = getpass(prompt=msg)
-            self.console.info('\n')
-            if not self.local_sudopw:
-                self.logger.info('Will not collect local sos, no password')
-                return False
-        self.log_debug('Able to collect local sos')
-        return True
-
     def _connect_to_node(self, node):
         '''Try to connect to the node, and if we can add to the client list to
         run sosreport on
@@ -569,12 +623,12 @@ this utility or remote systems that it connects to.
                 self.master.collect_extra_cmd(files)
         msg = '\nSuccessfully captured %s of %s sosreports'
         self.log_info(msg % (self.retrieved, self.report_num))
+        self.close_all_connections()
         if self.retrieved > 0:
             self.create_cluster_archive()
         else:
             msg = 'No sosreports were collected, nothing to archive...'
             self._exit(msg, 1)
-        self.close_all_connections()
 
     def _collect(self, client):
         '''Runs sosreport on each node'''

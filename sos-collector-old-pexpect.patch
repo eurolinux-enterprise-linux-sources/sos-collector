@@ -1,0 +1,24 @@
+diff --git a/soscollector/sosnode.py b/soscollector/sosnode.py
+index 3aba0bf..ff130ba 100644
+--- a/soscollector/sosnode.py
++++ b/soscollector/sosnode.py
+@@ -364,7 +364,9 @@ class SosNode():
+             get_pty = True
+         if not self.local and not force_local:
+             cmd = "%s %s" % (self.ssh_cmd, quote(cmd))
+-        res = pexpect.spawn(cmd, encoding='utf-8')
++        else:
++            cmd = "%s %s" % ('/bin/bash -c', quote(cmd))
++        res = pexpect.spawn(cmd)
+         if need_root:
+             if self.config['need_sudo']:
+                 res.sendline(self.config['sudo_pw'])
+@@ -432,7 +434,7 @@ class SosNode():
+                                        self.control_path,
+                                        self.config['ssh_user'],
+                                        self.address))
+-        res = pexpect.spawn(cmd, encoding='utf-8')
++        res = pexpect.spawn(cmd)
+ 
+         connect_expects = [
+             u'Connected',

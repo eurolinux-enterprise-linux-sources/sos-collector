@@ -1,0 +1,29 @@
+From 6dafb42064b06a80720c6017e2576aea9a7211de Mon Sep 17 00:00:00 2001
+From: Jake Hunsaker <jhunsake@redhat.com>
+Date: Tue, 9 Apr 2019 13:00:44 -0400
+Subject: [PATCH] [redhat] Update RHCOS image
+
+Updates the image used by RHCOS nodes to be the rhel8 image instead
+of rhel7.
+
+Signed-off-by: Jake Hunsaker <jhunsake@redhat.com>
+---
+ soscollector/hosts/redhat.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/soscollector/hosts/redhat.py b/soscollector/hosts/redhat.py
+index 33cec1f..774ecec 100644
+--- a/soscollector/hosts/redhat.py
++++ b/soscollector/hosts/redhat.py
+@@ -66,7 +66,7 @@ class RedHatCoreOSHost(RedHatHost):
+ 
+     containerized = True
+     container_runtime = 'podman'
+-    container_image = 'registry.redhat.io/rhel7/support-tools'
++    container_image = 'registry.redhat.io/rhel8/support-tools'
+     sos_path_strip = '/host'
+ 
+     def check_enabled(self, rel_string):
+-- 
+2.17.2
+

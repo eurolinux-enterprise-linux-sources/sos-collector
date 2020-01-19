@@ -42,6 +42,7 @@ class Configuration(dict):
         self['strip_sos_path'] = ''
         self['ssh_port'] = 22
         self['ssh_user'] = 'root'
+        self['ssh_key'] = None
         self['sos_cmd'] = 'sosreport --batch'
         self['no_local'] = False
         self['tmp_dir'] = None
@@ -138,7 +139,7 @@ class Configuration(dict):
                 try:
                     # there are no instances currently where any cluster option
                     # should contain a legitimate space.
-                    value = pipes.quote(option.split('=')[1].split()[0])
+                    value = option.split('=')[1].split()[0]
                 except IndexError:
                     # conversion to boolean is handled during validation
                     value = 'True'
@@ -169,6 +170,9 @@ class Configuration(dict):
         mod_short_name = modname.split('.')[2]
         module = __import__(modname, globals(), locals(), [mod_short_name])
         modules = inspect.getmembers(module, inspect.isclass)
+        for mod in modules:
+            if mod[0] in ('SosHost', 'Cluster'):
+                modules.remove(mod)
         return modules
 
     def _find_modules_in_path(self, path, modulename):
@@ -210,8 +214,6 @@ class Configuration(dict):
         supported_clusters = {}
         clusters = self._load_modules(package, 'clusters')
         for cluster in clusters:
-            if cluster[0] == 'Cluster':
-                continue
             supported_clusters[cluster[0]] = cluster[1](self)
         return supported_clusters
 
@@ -224,8 +226,6 @@ class Configuration(dict):
         supported_hosts = {}
         hosts = self._load_modules(package, 'hosts')
         for host in hosts:
-            if host[0] == 'SosHost':
-                continue
             supported_hosts[host[0]] = host[1]
         return supported_hosts
 

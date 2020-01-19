@@ -1,0 +1,30 @@
+From a614ed8e5621f931d8ee76f1f59747a46144cb2d Mon Sep 17 00:00:00 2001
+From: Jake Hunsaker <jhunsake@redhat.com>
+Date: Thu, 4 Apr 2019 14:19:13 -0400
+Subject: [PATCH] [jbon] Fix typo in check_enabled()
+
+Fixes a typo in the check_enabled() method that could potentially
+prevent sos-collector from correctly determining the cluster type on
+python3 under certain circumstances.
+
+Signed-off-by: Jake Hunsaker <jhunsake@redhat.com>
+---
+ soscollector/clusters/jbon.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/soscollector/clusters/jbon.py b/soscollector/clusters/jbon.py
+index 28552ff..ea85ddf 100644
+--- a/soscollector/clusters/jbon.py
++++ b/soscollector/clusters/jbon.py
+@@ -28,7 +28,7 @@ class jbon(Cluster):
+     def get_nodes(self):
+         return []
+ 
+-    def checK_enabled(self):
++    def check_enabled(self):
+         # This should never be called, but as insurance explicitly never
+         # allow this to be enabled via the determine_cluster() path
+         return False
+-- 
+2.17.2
+

@@ -9,11 +9,15 @@ sos_collector.egg-info/dependency_links.txt
 sos_collector.egg-info/top_level.txt
 soscollector/__init__.py
 soscollector/configuration.py
+soscollector/exceptions.py
 soscollector/sos_collector.py
 soscollector/sosnode.py
 soscollector/clusters/__init__.py
+soscollector/clusters/jbon.py
 soscollector/clusters/kubernetes.py
 soscollector/clusters/ovirt.py
 soscollector/clusters/pacemaker.py
+soscollector/clusters/satellite.py
 soscollector/hosts/__init__.py
+soscollector/hosts/debian.py
 soscollector/hosts/redhat.py

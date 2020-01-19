@@ -59,6 +59,7 @@ Become the root user on the remote node when connecting as a non-root user.
 \fB\-\-batch\fR
 Run in non-interactive mode. This will skip prompts for user input, with the
 exception of a prompt for the SSH password.
+.TP
 \fB\-\-all\-logs\fR
 Sosreport option. Collects all logs regardless of size. 
 
@@ -87,6 +88,11 @@ This is done by checking package or configuration information against the localh
 the master node if  \fB"--master"\fR is supplied.
 
 Setting \fB--cluster-type\fR skips this step and forcibly sets a particular profile.
+
+Using a value of \fBnone\fR or \fBjbon\fR (just a bunch of nodes) will effectively
+disable all cluster-specific checks, and cause sos-collector to only use the nodes
+specified by the \fB--nodes\fR option. Note that in this scenario, regex string(s)
+for node names will be ignored.
 
 Example: \fBsos-collector --cluster-type=kubernetes\fR will force the kubernetes profile
 to be run, and thus set sosreport options and attempt to determine a list of nodes using
@@ -229,6 +235,9 @@ the nodes. Consider increasing \fB\-\-timeout\fR when using this option.
 .TP
 \fB\-z\fR COMPRESSION, \fB\-\-compression-type\fR COMPRESSION
 Sosreport option. Override the default compression type.
+
+.SH SEE ALSO
+.BR sosreport (1)
 
 .SH MAINTAINER
     Jake Hunsaker <jhunsake@redhat.com>
