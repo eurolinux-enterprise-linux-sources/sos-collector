@@ -1,0 +1,13 @@
+Metadata-Version: 1.1
+Name: sos-collector
+Version: 1.4
+Summary: Capture sosreports from clustered systems simultaneously
+Home-page: https://github.com/sosreport/sos-collector
+Author: Jake Hunsaker
+Author-email: jhunsake@redhat.com
+License: GPLv2
+Description: sos-collector is a utility designed to capture sosreports from multiple nodes at once and collect them into a single archive. It is suited for use by support engineers and administrators of clustered or multi-node environments
+Platform: UNKNOWN
+Classifier: Intended Audience :: System Administrators
+Classifier: Topic :: System :: Systems Administration
+Classifier: License :: OSI Approved :: GNU General Public License v2 (GPLv2)

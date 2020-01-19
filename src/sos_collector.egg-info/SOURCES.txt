@@ -1,0 +1,17 @@
+LICENSE
+README.md
+setup.py
+sos-collector
+man/en/sos-collector.1
+sos_collector.egg-info/PKG-INFO
+sos_collector.egg-info/SOURCES.txt
+sos_collector.egg-info/dependency_links.txt
+sos_collector.egg-info/top_level.txt
+soscollector/__init__.py
+soscollector/configuration.py
+soscollector/sos_collector.py
+soscollector/sosnode.py
+soscollector/clusters/__init__.py
+soscollector/clusters/kubernetes.py
+soscollector/clusters/ovirt.py
+soscollector/clusters/pacemaker.py
